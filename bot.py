@@ -1,81 +1,140 @@
 import os
+import asyncio
+import logging
+from datetime import datetime
+from math import ceil
+
 import httpx
-from pyrogram import Client, filters
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.interval import IntervalTrigger
 from dotenv import load_dotenv
+from pyrogram import Client
+from pyrogram.enums import ParseMode
+from projects import PROJECTS
 
 load_dotenv()
+logging.basicConfig(level=logging.INFO)
 
-API_ID = int(os.getenv("API_ID"))
-API_HASH = os.getenv("API_HASH")
+# ---------------- CONFIG ----------------
+API_ID = int(os.getenv("API_ID", ""))
+API_HASH = os.getenv("API_HASH", "")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-RENDER_API_KEY = os.getenv("RENDER_API_KEY")
-OWNER_ID = int(os.getenv("OWNER_ID", "736279262"))
+OWNER_ID = int(os.getenv("OWNER_ID", ""))
 
-# ✅ Add your Render projects here
-PROJECTS = {
-    "file-streamer": "srv-cpudugmehbks73efe7a0",
-    "video-bot": "srv-cabc123xyz456def789",
-    "website-deploy": "srv-cdef987uvw654zyx321"
-}
+STATUS_CHANNEL_ID = int(os.getenv("STATUS_CHANNEL_ID", ""))
+STATUS_MESSAGE_ID = int(os.getenv("STATUS_MESSAGE_ID", ""))
 
-app = Client("render_deploy_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+CHECK_INTERVAL_MINUTES = 60
+PAGE_SIZE = 10
 
-async def trigger_render_deploy(service_id: str) -> str:
-    """Trigger render redeploy"""
-    url = f"https://api.render.com/deploy/{service_id}?key={RENDER_API_KEY}"
-    async with httpx.AsyncClient(timeout=30) as client:
-        try:
-            r = await client.post(url)
-            if r.status_code in [200, 201, 202]:
-                return f"✅ Deploy started for `{service_id}` (HTTP {r.status_code})"
-            else:
-                return f"⚠️ Failed to deploy `{service_id}` (HTTP {r.status_code})\nResponse: {r.text}"
-        except Exception as e:
-            return f"❌ Error: {e}"
+# ---------------- GLOBAL STATE ----------------
+HTTP_TIMEOUT = 10
+http_client = httpx.AsyncClient(timeout=HTTP_TIMEOUT)
+app = Client("render_manager_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# /start command
-@app.on_message(filters.command("start") & filters.user(OWNER_ID))
-async def start(_, message):
-    await message.reply_text(
-        "👋 Hello! This bot can redeploy your Render projects.\n\nUse /redeploy to choose a project."
+# ---------------- HELPERS ----------------
+async def check_app_status(app_url: str) -> str:
+    try:
+        r = await http_client.get(app_url)
+        if r.status_code == 200:
+            return "Online"
+        else:
+            return f"Unstable ({r.status_code})"
+    except Exception:
+        return "Down"
+
+async def trigger_render_deploy(deploy_url: str) -> str:
+    try:
+        r = await http_client.post(deploy_url, timeout=30)
+        if r.status_code == 200:
+            return "Redeploy triggered ✅"
+        else:
+            return f"Deploy failed ({r.status_code})"
+    except Exception as e:
+        return f"Error: {e}"
+
+def build_status_page(project_names, statuses):
+    total = len(project_names)
+    pages = max(1, ceil(total / PAGE_SIZE))
+    lines = []
+
+    for idx, name in enumerate(project_names, start=1):
+        status = statuses.get(name, "Unknown")
+        emoji = "🟢" if status == "Online" else ("🟡" if status.startswith("Unstable") else "🔴")
+        lines.append(f"{idx}. <b>{name}</b> — {emoji} {status}")
+
+    header = (
+        f"📊 <b>Project Status</b>\n"
+        f"Last checked: <code>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</code>\n\n"
     )
+    body = "\n".join(lines) if lines else "No projects to display."
+    footer = f"\n\nTotal projects: {total}"
+    return header + body + footer
 
-# /redeploy command — show list
-@app.on_message(filters.command("redeploy") & filters.user(OWNER_ID))
-async def redeploy_list(_, message):
-    buttons = []
-    for name, srv_id in PROJECTS.items():
-        buttons.append([InlineKeyboardButton(f"🚀 {name}", callback_data=f"deploy:{srv_id}:{name}")])
+# ---------------- CORE ----------------
+async def check_all_and_update_channel(send_notifications: bool = True):
+    logging.info("Running periodic check_all_and_update_channel()")
+    project_names = list(PROJECTS.keys())
+    statuses = {}
+    redeploy_results = {}
 
-    await message.reply_text(
-        "Select a project to redeploy 👇",
-        reply_markup=InlineKeyboardMarkup(buttons)
+    for name in project_names:
+        statuses[name] = await check_app_status(PROJECTS[name]["app_url"])
+
+    # Auto redeploy if down
+    for name, status in statuses.items():
+        if status == "Down":
+            result = await trigger_render_deploy(PROJECTS[name]["deploy_url"])
+            redeploy_results[name] = result
+            logging.warning(f"⚠️ {name} was Down — {result}")
+
+    # Update channel message
+    text = build_status_page(project_names, statuses)
+    try:
+        await app.edit_message_text(
+            chat_id=STATUS_CHANNEL_ID,
+            message_id=STATUS_MESSAGE_ID,
+            text=text,
+            parse_mode=ParseMode.HTML,
+        )
+        logging.info("✅ Channel status message updated.")
+    except Exception as e:
+        logging.error(f"Failed to edit channel message: {e}")
+
+    return statuses, redeploy_results
+
+# ---------------- SCHEDULER ----------------
+scheduler = AsyncIOScheduler()
+
+def start_scheduler(loop):
+    async def run_periodic_check():
+        await check_all_and_update_channel(send_notifications=True)
+
+    scheduler.add_job(
+        lambda: asyncio.run_coroutine_threadsafe(run_periodic_check(), loop),
+        trigger=IntervalTrigger(minutes=CHECK_INTERVAL_MINUTES),
+        id="auto_check_job",
+        replace_existing=True,
     )
+    scheduler.start()
+    logging.info(f"✅ Scheduler started — checking every {CHECK_INTERVAL_MINUTES} minute(s).")
 
-# Callback when button pressed
-@app.on_callback_query(filters.user(OWNER_ID))
-async def deploy_callback(_, query):
-    data = query.data
-    if not data.startswith("deploy:"):
-        return
+# ---------------- STARTUP ----------------
+async def main():
+    await app.start()
+    logging.info("🤖 Bot started.")
 
-    parts = data.split(":")
-    if len(parts) < 3:
-        await query.answer("Invalid data.", show_alert=True)
-        return
+    loop = asyncio.get_running_loop()
+    start_scheduler(loop)
 
-    service_id, project_name = parts[1], parts[2]
-    await query.message.edit_text(f"⏳ Redeploying *{project_name}* ...", parse_mode="markdown")
+    # First check immediately
+    await check_all_and_update_channel(send_notifications=False)
 
-    result = await trigger_render_deploy(service_id)
-    await query.message.edit_text(result, parse_mode="markdown")
-
-# Block others
-@app.on_message(~filters.user(OWNER_ID))
-async def block_others(_, message):
-    await message.reply_text("🚫 You are not authorized to use this bot.")
+    logging.info("Entering idle loop...")
+    await asyncio.Event().wait()
 
 if __name__ == "__main__":
-    print("🤖 Bot started...")
-    app.run()
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logging.info("Bot stopped manually.")
