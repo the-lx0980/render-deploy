@@ -1,10 +1,12 @@
-# 🛰️ Render Projects Auto Monitor Bot
+## 🛰️ Render apps Auto Monitor Bot
 
 A **fully automated Render project monitor bot** built using **Pyrogram** and **APScheduler**.  
-It periodically checks the status of multiple deployed web apps (e.g., on Render, Vercel, etc.),  
+It periodically checks the status of multiple deployed web apps on Render. 
 auto-redeploys any app that goes down, and posts live status updates in a Telegram **channel message**.
 
 ---
+## ⚠️ Note
+> Don't forget to start bot in PM
 
 ## ⚙️ Features
 
@@ -29,3 +31,20 @@ STATUS_MESSAGE_ID=22
 
 > 📝 Tip: The STATUS_MESSAGE_ID should be the message ID of a message already sent in your status channel (the bot must be admin there).
 
+
+## 🌐 Define Your Projects
+
+Edit ***projects.py*** and add your Render apps in the following format:
+```
+PROJECTS = {
+    "MyApp1": {
+        "app_url": "https://myapp1.onrender.com",
+        "deploy_url": "https://api.render.com/deploy/somehook1"
+    },
+    "MyApp2": {
+        "app_url": "https://myapp2.onrender.com",
+        "deploy_url": "https://api.render.com/deploy/somehook2"
+    },
+}
+
+```
