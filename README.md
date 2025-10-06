@@ -16,3 +16,16 @@ auto-redeploys any app that goes down, and posts live status updates in a Telegr
 
 ---
 
+```env
+API_ID=1234567
+API_HASH=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+BOT_TOKEN=1234567890:XXXXXXXXXXXXXXXXXXXXXXX
+OWNER_ID=5326801541
+
+# Channel where status message will be updated
+STATUS_CHANNEL_ID=-1001234567890
+STATUS_MESSAGE_ID=22
+```
+
+> 📝 Tip: The STATUS_MESSAGE_ID should be the message ID of a message already sent in your status channel (the bot must be admin there).
+
